@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#05070c" />
+    <meta
+      name="description"
+      content="Um observatório interativo para explorar as ideias da relatividade geral."
+    />
+    <title>COSMOS — Observatório da Relatividade</title>
+    <script type="module" crossorigin src="/assets/index-C1rRI26w.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-DRleyFyJ.css">
+  </head>
+  <body>
+    <div class="observatory">
+      <canvas id="universe" aria-label="Visualização tridimensional de conceitos de relatividade"></canvas>
+      <div class="fallback-scene" aria-hidden="true"></div>
+      <div class="vignette" aria-hidden="true"></div>
+      <div class="scanline" aria-hidden="true"></div>
+
+      <header class="topbar">
+        <a class="wordmark" href="#" aria-label="COSMOS, início" id="brand-home">
+          <span class="wordmark-mark" aria-hidden="true">C</span>
+          <span>COSMOS<small>OBSERVATÓRIO DA RELATIVIDADE</small></span>
+        </a>
+        <div class="top-status">
+          <span class="live-indicator"></span>
+          <span id="scene-status">OBSERVAÇÃO EM CURSO</span>
+          <span class="status-divider"></span>
+          <span id="scene-coordinate">LAT. 00° 00′</span>
+        </div>
+        <button class="text-button presenter-toggle" id="presenter-toggle" type="button" aria-expanded="false" aria-controls="presenter-notes">
+          <span class="button-icon" aria-hidden="true">◉</span>
+          <span>NOTAS</span>
+        </button>
+      </header>
+
+      <aside class="chapter-rail" aria-label="Capítulos da experiência">
+        <div class="rail-heading">EXPEDIÇÃO <span>01 — 06</span></div>
+        <nav id="chapter-navigation"></nav>
+        <div class="rail-foot">
+          <span class="rail-line"></span>
+          <span>SETAS PARA NAVEGAR</span>
+        </div>
+      </aside>
+
+      <main class="scene-content">
+        <div class="scene-kicker" id="scene-kicker"><span>01</span><span class="kicker-line"></span><span>FUNDAMENTOS</span></div>
+        <h1 id="scene-title" aria-live="polite">O tecido<br /><em>do universo</em></h1>
+        <p class="scene-description" id="scene-description"></p>
+        <div class="science-fact">
+          <span class="fact-mark" aria-hidden="true">✳</span>
+          <p><span>VOCÊ SABIA</span><br /><span id="scene-fact"></span></p>
+        </div>
+      </main>
+
+      <aside class="instrument-panel" aria-label="Instrumentos da cena">
+        <div class="panel-topline"><span>INSTRUMENTOS</span><span class="panel-index" id="panel-index">01 / 06</span></div>
+        <div id="scene-controls"></div>
+        <div class="panel-coordinates">
+          <span class="coordinate-label" id="coordinate-label">CAMPO ESPACIAL</span>
+          <span class="coordinate-value" id="coordinate-value">3D · INTERATIVO</span>
+        </div>
+      </aside>
+
+      <div class="scene-caption" id="scene-caption" aria-live="polite">
+        <span class="caption-dot"></span><span>UM MODELO VISUAL, NÃO UMA SIMULAÇÃO FÍSICA</span>
+      </div>
+
+      <div class="transport-controls" aria-label="Controles da experiência">
+        <button class="icon-button" id="reset-button" type="button" aria-label="Reiniciar experiência" title="Reiniciar (R)">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4.2 8a6 6 0 1 1-.1 4M4 4v4h4" /></svg>
+        </button>
+        <span class="transport-divider"></span>
+        <button class="play-button" id="pause-button" type="button" aria-label="Pausar animação" title="Pausar ou retomar (espaço)">
+          <span class="play-glyph" aria-hidden="true">Ⅱ</span><span id="pause-label">PAUSAR</span>
+        </button>
+        <span class="transport-hint">ARRASTE PARA EXPLORAR</span>
+      </div>
+
+      <aside class="presenter-notes" id="presenter-notes" aria-label="Notas privadas do apresentador" hidden>
+        <div class="notes-heading">
+          <div><span class="notes-eyebrow">VISÃO DO APRESENTADOR</span><h2>Notas de palco</h2></div>
+          <button class="icon-button notes-close" type="button" aria-label="Fechar notas">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15" /></svg>
+          </button>
+        </div>
+        <p class="notes-private">Estas anotações não fazem parte da projeção. Use as setas ← → para trocar de capítulo.</p>
+        <div class="notes-content" id="notes-content"></div>
+      </aside>
+
+      <div class="webgl-fallback-message" id="webgl-fallback-message" hidden>
+        <span>VISUALIZAÇÃO 3D INDISPONÍVEL</span>
+        <p>Seu navegador não oferece WebGL. A navegação e o conteúdo científico continuam disponíveis.</p>
+      </div>
+      <div class="keyboard-hint"><kbd>←</kbd><kbd>→</kbd><span>CAPÍTULOS</span><kbd>R</kbd><span>REINICIAR</span></div>
+    </div>
+  </body>
+</html>
