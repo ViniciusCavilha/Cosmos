@@ -33,7 +33,7 @@ const chapters = [
     fact: "O buraco negro desta cena é um modelo visual: as lentes e o disco não representam uma simulação física exata.",
     notes: "Dê tempo para a aproximação do buraco negro antes de explicar o horizonte de eventos. É a fronteira a partir da qual nem mesmo a luz pode escapar. Troque entre horizonte e curvatura nos instrumentos. Deixe explícito que o disco e a lente gravitacional são recursos didáticos, não uma previsão numérica.",
     coordinate: ["REGIÃO OBSERVADA", "MODELO · NÃO À ESCALA"],
-    camera: [0, 0, 8.4]
+    camera: [0, 0, 7.2]
   },
   {
     id: "waves",
@@ -374,11 +374,14 @@ function createTwinsScene(group) {
   );
   homeOrbit.rotation.x = Math.PI / 2;
   homeOrbit.position.x = -2.15;
+  homeOrbit.position.y = 1.3;
   group.add(homeOrbit);
   const earth = makeSphere(0.56, "#315ca9", { emissive: "#16346e", emissiveIntensity: 0.55, selectable: true });
   earth.position.x = -2.15;
+  earth.position.y = 1.3;
   group.add(earth);
   const traveller = new THREE.Group();
+  traveller.position.y = 1.3;
   group.add(traveller);
   const ship = new THREE.Group();
   traveller.add(ship);
@@ -390,13 +393,13 @@ function createTwinsScene(group) {
   shipRing.rotation.x = Math.PI / 2;
   ship.add(shipCore, shipRing);
   const path = makeLine([
-    new THREE.Vector3(-4.8, 0, 0),
-    new THREE.Vector3(-3.2, 0.15, 0),
-    new THREE.Vector3(-1.7, 0.3, 0),
-    new THREE.Vector3(0, 0.2, 0),
-    new THREE.Vector3(1.7, 0.05, 0),
-    new THREE.Vector3(3.3, -0.08, 0),
-    new THREE.Vector3(4.8, 0, 0)
+    new THREE.Vector3(-4.8, 1.3, 0),
+    new THREE.Vector3(-3.2, 1.45, 0),
+    new THREE.Vector3(-1.7, 1.6, 0),
+    new THREE.Vector3(0, 1.5, 0),
+    new THREE.Vector3(1.7, 1.35, 0),
+    new THREE.Vector3(3.3, 1.22, 0),
+    new THREE.Vector3(4.8, 1.3, 0)
   ], "#929fff", 0.28);
   group.add(path);
   const clockGroup = new THREE.Group();
@@ -413,7 +416,7 @@ function createTwinsScene(group) {
   clockGroup.add(clockOutline);
   const hand = makeLine([new THREE.Vector3(0, 0, 0.02), new THREE.Vector3(0.36, 0.15, 0.02)], "#e5c6ff", 0.9);
   clockGroup.add(hand);
-  clockGroup.position.set(3.4, 1.45, 0);
+  clockGroup.position.set(1.9, 1.45, 0);
   return { traveller, ship, shipCore, earth, hand, clockGroup };
 }
 
@@ -635,7 +638,6 @@ function renderControls(chapter, index) {
   };
   range.addEventListener("input", () => {
     interactionValue = Number(range.value);
-    userValue = interactionValue;
     reading.textContent = formatValue(interactionValue, control.unit);
     fill();
     updateSceneInteraction(index);
@@ -675,7 +677,6 @@ function updateSceneInteraction(index) {
 function setBlackHoleView(view) {
   if (activeView === view) return;
   activeView = view;
-  const chapter = chapters[2];
   const visual = sceneGroups[2].visual;
   const isCurvature = view === "curvature";
   if (webglAvailable) {
@@ -710,6 +711,25 @@ function updateBlackHoleCopy(view) {
   options.forEach((button, index) => button.setAttribute("aria-pressed", String((index === 1) === isCurvature)));
 }
 
+function resetBlackHoleVisual() {
+  if (!webglAvailable) return;
+  const visual = sceneGroups[2].visual;
+  gsap.killTweensOf([
+    ...visual.curvatureMaterials,
+    ...visual.diskMaterial,
+    visual.lensRing.material,
+    visual.horizonEdge.material,
+    visual.horizon.scale
+  ]);
+  visual.curvature.visible = false;
+  visual.curvatureMaterials.forEach((material) => { material.opacity = 0; });
+  visual.horizon.scale.setScalar(1);
+  visual.diskMaterial.forEach((material) => { material.opacity = material.userData.baseOpacity; });
+  visual.lensRing.material.opacity = 0.58;
+  visual.horizonEdge.material.opacity = 0.42;
+  activeView = "horizon";
+}
+
 function transitionText(chapter, index) {
   gsap.killTweensOf([dom.kicker, dom.title, dom.description, dom.fact]);
   const textElements = [dom.kicker, dom.title, dom.description, dom.fact];
@@ -725,6 +745,7 @@ function transitionText(chapter, index) {
       dom.description.textContent = chapter.description;
       dom.fact.textContent = chapter.fact;
       dom.notes.innerHTML = `<p>${chapter.notes}</p><p><strong>Interação:</strong> ${chapter.id === "blackhole" ? "Alterne entre horizonte de eventos e curvatura do espaço-tempo." : `${chapter.interaction.label.toLowerCase()} com o controle da cena.`}</p>`;
+      if (chapter.id === "blackhole" && currentChapter === index) updateBlackHoleCopy(activeView);
       gsap.fromTo(textElements, { opacity: 0, y: 13 }, {
         opacity: 1,
         y: 0,
@@ -762,6 +783,23 @@ function setActiveChapterUi(index, { animate = true } = {}) {
 
 function transitionScene(fromIndex, toIndex, duration = 1.6) {
   if (!webglAvailable) return;
+  activeTimeline?.kill();
+  activeTimeline = null;
+  sceneGroups.forEach(({ group }, index) => {
+    group.visible = index === fromIndex;
+    group.scale.setScalar(1);
+    group.rotation.set(0, 0, 0);
+    group.traverse((object) => {
+      if (!object.material || Array.isArray(object.material)) return;
+      gsap.killTweensOf(object.material);
+      if (object.material.userData.sceneBaseOpacity !== undefined) {
+        object.material.opacity = object.material.userData.sceneBaseOpacity;
+        object.material.transparent = object.material.userData.sceneBaseTransparent;
+        object.material.needsUpdate = true;
+      }
+    });
+  });
+  if (fromIndex === 2 || toIndex === 2) resetBlackHoleVisual();
   const outgoing = sceneGroups[fromIndex];
   const incoming = sceneGroups[toIndex];
   incoming.group.visible = true;
@@ -782,7 +820,6 @@ function transitionScene(fromIndex, toIndex, duration = 1.6) {
       object.material.needsUpdate = true;
     }
   });
-  activeTimeline?.kill();
   activeTimeline = gsap.timeline({ defaults: { ease: "power2.inOut" } });
   activeTimeline.to(outgoing.group.scale, { x: 0.84, y: 0.84, z: 0.84, duration: duration * 0.42 }, 0);
   activeTimeline.to(outgoing.group.rotation, { y: 0.28, x: -0.08, duration: duration * 0.42 }, 0);
@@ -795,11 +832,10 @@ function transitionScene(fromIndex, toIndex, duration = 1.6) {
     activeTimeline.to(opacityMaterials, {
       opacity: (index, material) => material.userData.sceneBaseOpacity,
       duration: duration * 0.74,
-      stagger: 0.012
+      stagger: 0.001
     }, 0.08);
   }
   const nextCamera = chapters[toIndex].camera;
-  cameraState.x = cameraState.x;
   activeTimeline.to(cameraState, {
     x: nextCamera[0],
     y: nextCamera[1],
@@ -815,10 +851,9 @@ function transitionScene(fromIndex, toIndex, duration = 1.6) {
     outgoing.group.visible = false;
     outgoing.group.scale.setScalar(1);
     outgoing.group.rotation.set(0, 0, 0);
-  }, [], duration * 0.72);
+  }, [], duration * 0.92);
   if (toIndex === 2) {
     activeTimeline.fromTo(incoming.group.rotation, { y: -0.32 }, { y: 0, duration: 1.15, ease: "power2.out" }, 0.1);
-    activeTimeline.to(cameraState, { z: 7.2, duration: 2.3, ease: "power3.inOut" }, 0.25);
   }
 }
 
@@ -826,39 +861,46 @@ function selectChapter(index, options = {}) {
   if (index < 0 || index >= chapters.length || index === currentChapter) return;
   const previous = currentChapter;
   currentChapter = index;
-  if (isPaused) gsap.globalTimeline.resume();
+  if (index === 2) resetBlackHoleVisual();
+  if (isPaused) {
+    gsap.globalTimeline.resume();
+    clock.start();
+  }
   isPaused = false;
   dom.pauseLabel.textContent = "PAUSAR";
   dom.pause.setAttribute("aria-label", "Pausar animação");
   document.querySelector(".play-glyph").textContent = "Ⅱ";
   setActiveChapterUi(index);
   transitionScene(previous, index, options.immediate || prefersReducedMotion ? 0.01 : index === 2 ? 2.5 : 1.55);
-  if (index !== 2) {
-    activeView = "horizon";
-  }
-  if (index === 2) activeView = "horizon";
 }
 
 function resetExperience() {
   isPaused = false;
+  activeTimeline?.kill();
+  activeTimeline = null;
   pointerTarget.set(0, 0);
   pointer.set(0, 0);
   interactionValue = chapters[currentChapter].interaction?.value ?? 50;
   activeView = "horizon";
   gsap.globalTimeline.resume();
+  clock.start();
   if (webglAvailable) {
-    sceneGroups.forEach(({ group }) => {
+    sceneGroups.forEach(({ group }, index) => {
+      group.visible = index === currentChapter;
       group.scale.setScalar(1);
       group.rotation.set(0, 0, 0);
+      group.traverse((object) => {
+        if (!object.material || Array.isArray(object.material)) return;
+        gsap.killTweensOf(object.material);
+        if (object.material.userData.sceneBaseOpacity !== undefined) {
+          object.material.opacity = object.material.userData.sceneBaseOpacity;
+          object.material.transparent = object.material.userData.sceneBaseTransparent;
+          object.material.needsUpdate = true;
+        }
+      });
     });
     if (currentChapter === 2) {
-      const visual = sceneGroups[2].visual;
-      visual.curvature.visible = false;
-      visual.horizon.scale.setScalar(1);
-      visual.diskMaterial.forEach((material) => { material.opacity = material.userData.baseOpacity; });
-      visual.curvatureMaterials.forEach((material) => { material.opacity = 0; });
-      visual.lensRing.material.opacity = 0.58;
-      visual.horizonEdge.material.opacity = 0.42;
+      resetBlackHoleVisual();
     }
     if (currentChapter === 3) animationState.wave = 1;
     if (currentChapter === 0) {

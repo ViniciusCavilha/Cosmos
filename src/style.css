@@ -89,7 +89,7 @@ button:focus-visible, a:focus-visible { outline: 1px solid #9aafff; outline-offs
 .panel-coordinates { display: flex; justify-content: space-between; gap: 8px; margin-top: 22px; padding-top: 11px; border-top: 1px solid var(--line); font-size: 7px; }
 .coordinate-label { color: #798295; }
 .coordinate-value { color: #a8b5df; text-align: right; }
-.scene-caption { position: absolute; right: 4.15vw; bottom: 44px; display: flex; align-items: center; gap: 8px; color: #70798b; font-size: 7px; letter-spacing: .12em; }
+.scene-caption { position: absolute; right: 4.15vw; bottom: 74px; display: flex; align-items: center; gap: 8px; color: #70798b; font-size: 7px; letter-spacing: .12em; }
 .caption-dot { width: 4px; height: 4px; }
 
 .transport-controls { position: absolute; bottom: 35px; left: 50%; display: flex; align-items: center; gap: 15px; transform: translateX(-50%); color: #9ca4b5; }
@@ -126,7 +126,7 @@ button:focus-visible, a:focus-visible { outline: 1px solid #9aafff; outline-offs
   .instrument-panel { right: 3vw; width: 21vw; min-width: 175px; }
   .topbar { padding: 0 3vw; }
   .transport-hint, .keyboard-hint { display: none; }
-  .scene-caption { right: 3vw; }
+  .scene-caption { right: 3vw; bottom: 74px; }
 }
 @media (max-width: 650px) {
   html, body, #app, .observatory { min-height: 620px; }
