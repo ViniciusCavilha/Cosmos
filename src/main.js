@@ -1,6 +1,11 @@
 import "./style.css";
 import * as THREE from "three";
 import { gsap } from "gsap";
+import { createBlackHole } from "./black-hole.js";
+import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
+import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
+import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
+import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
 
 const chapters = [
   {
@@ -96,6 +101,7 @@ let isPaused = false;
 let activeView = "horizon";
 let interactionValue = chapters[0].interaction.value;
 let renderer;
+let composer;
 let scene;
 let camera;
 let raycaster;
@@ -124,19 +130,299 @@ function makeLine(points, color, opacity = 0.22) {
   return line;
 }
 
-function makeSphere(radius, color, options = {}) {
-  const mesh = new THREE.Mesh(
-    new THREE.SphereGeometry(radius, 48, 32),
-    new THREE.MeshStandardMaterial({
-      color,
-      roughness: options.roughness ?? 0.56,
-      metalness: options.metalness ?? 0.12,
-      emissive: options.emissive ?? "#000000",
-      emissiveIntensity: options.emissiveIntensity ?? 0.18
-    })
+const surfaceNoise = `
+float surfaceHash(vec3 p) {
+  p = fract(p * 0.3183099 + vec3(0.1, 0.2, 0.3));
+  p *= 17.0;
+  return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+}
+
+float surfaceNoise3(vec3 p) {
+  vec3 cell = floor(p);
+  vec3 f = fract(p);
+  f = f * f * (3.0 - 2.0 * f);
+  return mix(
+    mix(mix(surfaceHash(cell), surfaceHash(cell + vec3(1.0, 0.0, 0.0)), f.x),
+        mix(surfaceHash(cell + vec3(0.0, 1.0, 0.0)), surfaceHash(cell + vec3(1.0, 1.0, 0.0)), f.x), f.y),
+    mix(mix(surfaceHash(cell + vec3(0.0, 0.0, 1.0)), surfaceHash(cell + vec3(1.0, 0.0, 1.0)), f.x),
+        mix(surfaceHash(cell + vec3(0.0, 1.0, 1.0)), surfaceHash(cell + vec3(1.0, 1.0, 1.0)), f.x), f.y),
+    f.z
   );
+}
+
+float surfaceFbm(vec3 p) {
+  float value = 0.0;
+  float amplitude = 0.5;
+  for (int octave = 0; octave < 5; octave++) {
+    value += surfaceNoise3(p) * amplitude;
+    p *= 2.03;
+    amplitude *= 0.5;
+  }
+  return value;
+}
+`;
+
+function makeSphere(radius, color, options = {}) {
+  const material = new THREE.MeshStandardMaterial({
+    color: options.surface ? "#ffffff" : color,
+    roughness: options.roughness ?? 0.56,
+    metalness: options.metalness ?? 0.12,
+    emissive: options.emissive ?? "#000000",
+    emissiveIntensity: options.emissiveIntensity ?? 0.18
+  });
+  if (options.surface) {
+    const type = options.surface;
+    material.onBeforeCompile = (shader) => {
+      shader.vertexShader = shader.vertexShader
+        .replace("#include <common>", "#include <common>\nvarying vec3 vSurfacePosition;")
+        .replace("#include <begin_vertex>", "#include <begin_vertex>\nvSurfacePosition = normalize(position);");
+      shader.fragmentShader = shader.fragmentShader
+        .replace("#include <common>", `#include <common>\n${type === "sun" ? "uniform float uSurfaceTime;" : ""}\nvarying vec3 vSurfacePosition;\n${surfaceNoise}`)
+        .replace("#include <color_fragment>", `#include <color_fragment>
+          vec3 surfacePoint = normalize(vSurfacePosition);
+          float broadTerrain = surfaceFbm(surfacePoint * 5.4);
+          float fineTerrain = surfaceFbm(surfacePoint * 25.0);
+          ${type === "earth" ? `
+            float land = smoothstep(0.475, 0.535, broadTerrain + fineTerrain * 0.2);
+            float elevation = smoothstep(0.54, 0.72, broadTerrain + fineTerrain * 0.18);
+            vec3 oceanColor = mix(vec3(0.006, 0.035, 0.12), vec3(0.018, 0.19, 0.36), smoothstep(0.25, 0.74, fineTerrain));
+            vec3 continentColor = mix(vec3(0.045, 0.12, 0.055), vec3(0.34, 0.3, 0.16), elevation);
+            continentColor = mix(continentColor, vec3(0.63, 0.66, 0.6), smoothstep(0.73, 0.85, broadTerrain));
+            float polarIce = smoothstep(0.77, 0.94, abs(surfacePoint.y) + broadTerrain * 0.14);
+            diffuseColor.rgb = mix(oceanColor, continentColor, land);
+            diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.72, 0.79, 0.86), polarIce * 0.82);
+            diffuseColor.rgb *= 0.88 + fineTerrain * 0.25;
+          ` : type === "rocky" ? `
+            float cratered = surfaceFbm(surfacePoint * 36.0);
+            float mineral = surfaceFbm(surfacePoint * 11.0);
+            vec3 rockColor = mix(vec3(0.11, 0.13, 0.17), vec3(0.48, 0.45, 0.39), mineral);
+            float craterRim = smoothstep(0.46, 0.52, fineTerrain) * (1.0 - smoothstep(0.55, 0.63, fineTerrain));
+            diffuseColor.rgb = rockColor * (0.68 + cratered * 0.5) + craterRim * 0.12;
+          ` : type === "gas" ? `
+            float bands = sin(surfacePoint.y * 37.0 + surfaceFbm(surfacePoint * 9.0) * 9.0);
+            float swirls = surfaceFbm(surfacePoint * 21.0 + vec3(bands * 0.18, 0.0, bands * 0.14));
+            vec3 bandColor = mix(vec3(0.16, 0.22, 0.34), vec3(0.75, 0.46, 0.25), smoothstep(-0.22, 0.66, bands + swirls * 0.34));
+            diffuseColor.rgb = mix(bandColor, vec3(0.92, 0.77, 0.54), smoothstep(0.71, 0.82, fineTerrain) * 0.42);
+          ` : `
+            float convection = surfaceFbm(surfacePoint * 18.0 + vec3(0.0, uSurfaceTime * 0.045, 0.0));
+            float filaments = surfaceFbm(surfacePoint * 58.0 + vec3(convection * 1.4, 0.0, convection * 1.4));
+            vec3 photosphere = mix(vec3(0.75, 0.12, 0.018), vec3(2.5, 0.72, 0.12), smoothstep(0.29, 0.78, convection + filaments * 0.2));
+            photosphere += vec3(1.0, 0.35, 0.05) * smoothstep(0.69, 0.86, fineTerrain) * 0.55;
+            diffuseColor.rgb = photosphere;
+            totalEmissiveRadiance = photosphere * 1.35;
+          `}
+        `);
+      if (type === "sun") {
+        shader.uniforms.uSurfaceTime = { value: 0 };
+        material.userData.surfaceShader = shader;
+      }
+    };
+    material.customProgramCacheKey = () => `cosmos-surface-${type}`;
+    if (type === "sun") {
+      material.emissive.set("#ff5a12");
+      material.emissiveIntensity = 0.75;
+    }
+  }
+  const mesh = new THREE.Mesh(new THREE.SphereGeometry(radius, 96, 64), material);
   if (options.selectable) mesh.userData.selectable = true;
   return mesh;
+}
+
+function createAtmosphere(radius, color = "#6da8ff", opacity = 0.55) {
+  const material = new THREE.ShaderMaterial({
+    uniforms: { uAtmosphereColor: { value: new THREE.Color(color) }, uAtmosphereOpacity: { value: opacity } },
+    vertexShader: `
+      varying vec3 vAtmosphereNormal;
+      varying vec3 vAtmosphereViewDirection;
+      void main() {
+        vec4 viewPosition = modelViewMatrix * vec4(position, 1.0);
+        vAtmosphereNormal = normalize(normalMatrix * normal);
+        vAtmosphereViewDirection = normalize(-viewPosition.xyz);
+        gl_Position = projectionMatrix * viewPosition;
+      }
+    `,
+    fragmentShader: `
+      uniform vec3 uAtmosphereColor;
+      uniform float uAtmosphereOpacity;
+      varying vec3 vAtmosphereNormal;
+      varying vec3 vAtmosphereViewDirection;
+      void main() {
+        float facing = abs(dot(normalize(vAtmosphereNormal), normalize(vAtmosphereViewDirection)));
+        float fresnel = pow(1.0 - facing, 2.6);
+        float glow = smoothstep(0.05, 0.88, fresnel);
+        gl_FragColor = vec4(uAtmosphereColor * (0.38 + fresnel * 1.5), glow * uAtmosphereOpacity);
+        #include <tonemapping_fragment>
+        #include <colorspace_fragment>
+      }
+    `,
+    side: THREE.BackSide,
+    transparent: true,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false
+  });
+  const atmosphere = new THREE.Mesh(new THREE.SphereGeometry(radius, 72, 48), material);
+  atmosphere.renderOrder = 2;
+  return atmosphere;
+}
+
+function createCloudLayer(radius) {
+  const material = new THREE.MeshStandardMaterial({
+    color: "#e5efff",
+    transparent: true,
+    opacity: 0.46,
+    roughness: 1,
+    depthWrite: false
+  });
+  material.onBeforeCompile = (shader) => {
+    shader.vertexShader = shader.vertexShader
+      .replace("#include <common>", "#include <common>\nvarying vec3 vCloudPosition;")
+      .replace("#include <begin_vertex>", "#include <begin_vertex>\nvCloudPosition = normalize(position);");
+    shader.fragmentShader = shader.fragmentShader
+      .replace("#include <common>", `#include <common>\nvarying vec3 vCloudPosition;\n${surfaceNoise}`)
+      .replace("#include <color_fragment>", `#include <color_fragment>
+        float cloudDensity = surfaceFbm(vCloudPosition * 12.0 + vec3(0.0, 0.45, 0.0));
+        float cloudDetail = surfaceFbm(vCloudPosition * 35.0);
+        diffuseColor.a *= smoothstep(0.49, 0.64, cloudDensity + cloudDetail * 0.12);
+      `);
+  };
+  material.customProgramCacheKey = () => "cosmos-earth-clouds";
+  const clouds = new THREE.Mesh(new THREE.SphereGeometry(radius * 1.009, 72, 48), material);
+  clouds.renderOrder = 1;
+  return clouds;
+}
+
+function createSolarArray(width, height) {
+  const array = new THREE.Group();
+  const cells = new THREE.Mesh(
+    new THREE.BoxGeometry(width, height, 0.025),
+    new THREE.MeshPhysicalMaterial({
+      color: "#07183f",
+      emissive: "#0b2b72",
+      emissiveIntensity: 0.26,
+      metalness: 0.66,
+      roughness: 0.18,
+      clearcoat: 0.72,
+      clearcoatRoughness: 0.2
+    })
+  );
+  array.add(cells);
+
+  const railMaterial = new THREE.MeshStandardMaterial({ color: "#98a7b8", metalness: 0.92, roughness: 0.24 });
+  for (let index = 1; index < 6; index += 1) {
+    const rail = new THREE.Mesh(new THREE.BoxGeometry(0.008, height * 0.98, 0.032), railMaterial);
+    rail.position.x = -width / 2 + (width / 6) * index;
+    array.add(rail);
+  }
+  const centerRail = new THREE.Mesh(new THREE.BoxGeometry(width * 0.98, 0.009, 0.033), railMaterial);
+  array.add(centerRail);
+  return array;
+}
+
+function createDetailedSatellite(scale = 1) {
+  const satellite = new THREE.Group();
+  const goldFoil = new THREE.MeshPhysicalMaterial({
+    color: "#b87924",
+    emissive: "#3b1905",
+    emissiveIntensity: 0.12,
+    metalness: 0.86,
+    roughness: 0.34,
+    clearcoat: 0.28
+  });
+  const metal = new THREE.MeshStandardMaterial({ color: "#b7c0ca", metalness: 0.94, roughness: 0.2 });
+  const darkMetal = new THREE.MeshStandardMaterial({ color: "#171d28", metalness: 0.82, roughness: 0.28 });
+
+  const bus = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.28, 0.28, 2, 2, 2), goldFoil);
+  bus.userData.selectable = true;
+  const equipmentDeck = new THREE.Mesh(new THREE.CylinderGeometry(0.14, 0.14, 0.08, 20), darkMetal);
+  equipmentDeck.rotation.z = Math.PI / 2;
+  equipmentDeck.position.x = 0.2;
+  const mast = new THREE.Mesh(new THREE.CylinderGeometry(0.018, 0.018, 0.28, 10), metal);
+  mast.rotation.z = Math.PI / 2;
+  mast.position.x = 0.38;
+  const dish = new THREE.Mesh(
+    new THREE.ConeGeometry(0.16, 0.07, 32, 1, true),
+    new THREE.MeshPhysicalMaterial({ color: "#d7dbe0", metalness: 0.76, roughness: 0.17, side: THREE.DoubleSide })
+  );
+  dish.rotation.z = -Math.PI / 2;
+  dish.position.x = 0.53;
+  const receiver = new THREE.Mesh(new THREE.SphereGeometry(0.025, 12, 8), darkMetal);
+  receiver.position.x = 0.62;
+
+  const panelLeft = createSolarArray(0.62, 0.23);
+  panelLeft.position.x = -0.5;
+  const panelRight = createSolarArray(0.62, 0.23);
+  panelRight.position.x = 0.5;
+  const panelBoom = new THREE.Mesh(new THREE.BoxGeometry(1.05, 0.022, 0.022), metal);
+
+  const antennaOne = new THREE.Mesh(new THREE.CylinderGeometry(0.009, 0.009, 0.42, 8), metal);
+  antennaOne.position.set(-0.08, 0.34, 0);
+  const antennaTip = new THREE.Mesh(
+    new THREE.SphereGeometry(0.025, 12, 8),
+    new THREE.MeshBasicMaterial({ color: "#a8cbff", toneMapped: false })
+  );
+  antennaTip.position.y = 0.23;
+  antennaOne.add(antennaTip);
+
+  satellite.add(bus, equipmentDeck, mast, dish, receiver, panelBoom, panelLeft, panelRight, antennaOne);
+  satellite.scale.setScalar(scale);
+  satellite.rotation.set(0.18, -0.35, 0.12);
+  return satellite;
+}
+
+function createDetailedSpacecraft() {
+  const ship = new THREE.Group();
+  const hullMaterial = new THREE.MeshPhysicalMaterial({
+    color: "#aeb8c4",
+    metalness: 0.82,
+    roughness: 0.22,
+    clearcoat: 0.48,
+    clearcoatRoughness: 0.18
+  });
+  const heatShield = new THREE.MeshStandardMaterial({ color: "#222934", metalness: 0.68, roughness: 0.42 });
+  const windowMaterial = new THREE.MeshPhysicalMaterial({
+    color: "#61baff",
+    emissive: "#176fc4",
+    emissiveIntensity: 0.72,
+    metalness: 0.15,
+    roughness: 0.08,
+    transmission: 0.08,
+    clearcoat: 1
+  });
+
+  const hull = new THREE.Mesh(new THREE.CylinderGeometry(0.15, 0.22, 0.68, 24, 2), hullMaterial);
+  hull.rotation.z = -Math.PI / 2;
+  hull.userData.selectable = true;
+  const nose = new THREE.Mesh(new THREE.ConeGeometry(0.22, 0.34, 24), heatShield);
+  nose.rotation.z = -Math.PI / 2;
+  nose.position.x = 0.5;
+  const engine = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.11, 0.18, 20), heatShield);
+  engine.rotation.z = -Math.PI / 2;
+  engine.position.x = -0.43;
+  const engineGlow = new THREE.Mesh(
+    new THREE.ConeGeometry(0.1, 0.4, 20, 1, true),
+    new THREE.MeshBasicMaterial({ color: "#6ec8ff", transparent: true, opacity: 0.42, blending: THREE.AdditiveBlending, side: THREE.DoubleSide, depthWrite: false })
+  );
+  engineGlow.rotation.z = Math.PI / 2;
+  engineGlow.position.x = -0.68;
+
+  const windowBand = new THREE.Mesh(new THREE.CylinderGeometry(0.158, 0.158, 0.11, 24), windowMaterial);
+  windowBand.rotation.z = -Math.PI / 2;
+  windowBand.position.x = 0.22;
+  const truss = new THREE.Mesh(new THREE.BoxGeometry(0.62, 0.045, 0.045), hullMaterial);
+  truss.position.x = -0.08;
+  const panels = createSolarArray(0.5, 0.24);
+  panels.rotation.y = Math.PI / 2;
+  panels.position.z = 0.36;
+  const panelsMirror = panels.clone(true);
+  panelsMirror.position.z = -0.36;
+  const radiator = new THREE.Mesh(
+    new THREE.BoxGeometry(0.34, 0.018, 0.18),
+    new THREE.MeshStandardMaterial({ color: "#e0e4e7", metalness: 0.58, roughness: 0.28 })
+  );
+  radiator.position.set(-0.15, 0.23, 0);
+
+  ship.add(hull, nose, engine, engineGlow, windowBand, truss, panels, panelsMirror, radiator);
+  return { ship, engineGlow, windowBand };
 }
 
 function createStarfield() {
@@ -158,13 +444,24 @@ function createStarfield() {
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
   geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
-  const stars = new THREE.Points(geometry, new THREE.PointsMaterial({
+  const starMaterial = new THREE.PointsMaterial({
     size: 0.095,
     vertexColors: true,
     transparent: true,
     opacity: 0.76,
     sizeAttenuation: true
-  }));
+  });
+  starMaterial.onBeforeCompile = (shader) => {
+    shader.fragmentShader = shader.fragmentShader.replace(
+      "#include <color_fragment>",
+      `#include <color_fragment>
+       float starDisc = length(gl_PointCoord - vec2(0.5));
+       diffuseColor.a *= 1.0 - smoothstep(0.12, 0.5, starDisc);
+       diffuseColor.rgb *= 0.78 + 0.22 * (1.0 - starDisc * 2.0);`
+    );
+  };
+  starMaterial.customProgramCacheKey = () => "cosmos-soft-star-points";
+  const stars = new THREE.Points(geometry, starMaterial);
   scene.add(stars);
   return stars;
 }
@@ -211,23 +508,32 @@ function createPlanetWithOrbit(group, options = {}) {
 function createSpacetimeScene(group) {
   const grid = createWarpedGrid(group, { color: "#566eaf", extent: 7.2, divisions: 19, depth: 0.35 });
   grid.rotation.x = -0.08;
-  const center = makeSphere(0.9, "#203a77", { emissive: "#182f70", emissiveIntensity: 0.55, selectable: true });
+  const center = makeSphere(0.9, "#203a77", { surface: "rocky", selectable: true });
   center.position.set(0, -0.25, 0);
   group.add(center);
+  const atmosphere = createAtmosphere(0.99, "#719bff", 0.46);
+  atmosphere.position.copy(center.position);
+  group.add(atmosphere);
+  const clouds = createCloudLayer(0.9);
+  clouds.position.copy(center.position);
+  group.add(clouds);
   const centerGlow = new THREE.Mesh(
     new THREE.SphereGeometry(1.12, 32, 24),
     new THREE.MeshBasicMaterial({ color: "#6d8fff", transparent: true, opacity: 0.06, side: THREE.BackSide })
   );
   centerGlow.position.copy(center.position);
   group.add(centerGlow);
-  return { grid, center, centerGlow };
+  return { grid, center, centerGlow, atmosphere, clouds };
 }
 
 function createGravityScene(group) {
   const grid = createWarpedGrid(group, { color: "#657db9", extent: 7.4, divisions: 17, depth: 3.5 });
-  const sun = makeSphere(1.12, "#d29b68", { emissive: "#b35228", emissiveIntensity: 0.48, selectable: true });
+  const sun = makeSphere(1.12, "#d29b68", { surface: "sun", selectable: true });
   sun.position.y = -0.62;
   group.add(sun);
+  const corona = createAtmosphere(1.28, "#ff9a55", 0.7);
+  corona.position.copy(sun.position);
+  group.add(corona);
   const aura = new THREE.Mesh(
     new THREE.SphereGeometry(1.42, 32, 24),
     new THREE.MeshBasicMaterial({ color: "#f5b467", transparent: true, opacity: 0.075, side: THREE.BackSide })
@@ -244,104 +550,57 @@ function createGravityScene(group) {
   const satellitePivot = new THREE.Group();
   satellitePivot.rotation.x = Math.PI / 2;
   group.add(satellitePivot);
-  const planet = makeSphere(0.23, "#8baeff", { emissive: "#304fa5", emissiveIntensity: 0.5, selectable: true });
+  const planet = makeSphere(0.23, "#8baeff", { surface: "earth", selectable: true });
+  const planetAtmosphere = createAtmosphere(0.265, "#80bfff", 0.48);
+  planet.add(planetAtmosphere);
   planet.position.x = 3.1;
   satellitePivot.add(planet);
-  return { grid, sun, aura, satellitePivot, orbit };
+  return { grid, sun, aura, corona, satellitePivot, planet, orbit };
 }
 
 function createBlackHoleScene(group) {
-  const lensGlow = new THREE.Mesh(
-    new THREE.SphereGeometry(2.12, 48, 32),
-    new THREE.MeshBasicMaterial({ color: "#7147ff", transparent: true, opacity: 0.05, side: THREE.BackSide, depthWrite: false })
-  );
-  group.add(lensGlow);
-  const lensRing = new THREE.Mesh(
-    new THREE.TorusGeometry(2.06, 0.035, 8, 180),
-    new THREE.MeshBasicMaterial({ color: "#a18bff", transparent: true, opacity: 0.58 })
-  );
-  lensRing.rotation.x = 1.37;
-  lensRing.userData.selectable = true;
-  group.add(lensRing);
-  const horizon = new THREE.Mesh(
-    new THREE.SphereGeometry(1.05, 48, 32),
-    new THREE.MeshBasicMaterial({ color: "#010205", transparent: true, opacity: 1 })
-  );
-  horizon.userData.selectable = true;
-  group.add(horizon);
-  const horizonEdge = new THREE.Mesh(
-    new THREE.TorusGeometry(1.09, 0.026, 8, 144),
-    new THREE.MeshBasicMaterial({ color: "#ccb5ff", transparent: true, opacity: 0.42 })
-  );
-  horizonEdge.rotation.x = 1.39;
-  group.add(horizonEdge);
-  const disk = new THREE.Group();
-  group.add(disk);
-  const diskLayers = [
-    { inner: 1.22, outer: 1.62, color: "#5944e6", opacity: 0.24 },
-    { inner: 1.4, outer: 2.13, color: "#9451f2", opacity: 0.35 },
-    { inner: 1.7, outer: 2.78, color: "#cf6fef", opacity: 0.32 },
-    { inner: 2.13, outer: 3.15, color: "#f5a46d", opacity: 0.18 }
-  ];
-  const diskMaterial = [];
-  diskLayers.forEach((layer, index) => {
-    const material = new THREE.MeshBasicMaterial({
-      color: layer.color,
-      transparent: true,
-      opacity: layer.opacity,
-      side: THREE.DoubleSide,
-      depthWrite: false,
-      blending: THREE.AdditiveBlending
-    });
-    material.userData.baseOpacity = layer.opacity;
-    diskMaterial.push(material);
-    const ring = new THREE.Mesh(new THREE.RingGeometry(layer.inner, layer.outer, 144), material);
-    ring.rotation.x = Math.PI * 0.43;
-    ring.rotation.y = -0.17;
-    ring.userData.selectable = index === 2;
-    disk.add(ring);
-  });
-  const farHalo = new THREE.Mesh(
-    new THREE.TorusGeometry(2.36, 0.11, 8, 200),
-    new THREE.MeshBasicMaterial({ color: "#eda9ff", transparent: true, opacity: 0.35, blending: THREE.AdditiveBlending })
-  );
-  farHalo.rotation.x = 1.28;
-  group.add(farHalo);
+  group.position.set(1.05, 0.6, 0);
+  const blackHole = createBlackHole();
+  group.add(blackHole.mesh);
   const curvature = createWarpedGrid(group, { color: "#a27cff", extent: 7, divisions: 18, depth: 2.7, centerRadius: 1.1 });
   curvature.visible = false;
   const curvatureMaterials = [];
   curvature.traverse((object) => {
     if (!object.material) return;
+    object.renderOrder = 11;
     object.material.userData.baseOpacity = object.material.opacity;
     curvatureMaterials.push(object.material);
   });
-  const particlePositions = new Float32Array(180 * 3);
-  for (let index = 0; index < 180; index += 1) {
-    const angle = Math.random() * Math.PI * 2;
-    const radius = 2.35 + Math.random() * 1.05;
-    particlePositions[index * 3] = Math.cos(angle) * radius;
-    particlePositions[index * 3 + 1] = (Math.random() - 0.5) * 0.22;
-    particlePositions[index * 3 + 2] = Math.sin(angle) * radius;
-  }
-  const particleGeometry = new THREE.BufferGeometry();
-  particleGeometry.setAttribute("position", new THREE.BufferAttribute(particlePositions, 3));
-  const particles = new THREE.Points(particleGeometry, new THREE.PointsMaterial({
-    color: "#f5c6ff",
-    size: 0.045,
-    transparent: true,
-    opacity: 0.75,
-    sizeAttenuation: true,
-    blending: THREE.AdditiveBlending
-  }));
-  group.add(particles);
-  return { horizon, horizonEdge, lensGlow, lensRing, disk, diskMaterial, farHalo, curvature, curvatureMaterials, particles };
+  return { ...blackHole, curvature, curvatureMaterials };
+}
+
+function fitBlackHoleToViewport() {
+  const { group, visual } = sceneGroups[2];
+  const mobile = window.innerWidth <= 650;
+  group.position.set(mobile ? 0 : 1.05, mobile ? 1.5 : 0.6, 0);
+  visual.mesh.scale.setScalar(mobile ? 0.48 : 1);
 }
 
 function createWavesScene(group) {
   const binaries = new THREE.Group();
   group.add(binaries);
-  const starOne = makeSphere(0.48, "#84a3ff", { emissive: "#4768ef", emissiveIntensity: 0.9, selectable: true });
-  const starTwo = makeSphere(0.37, "#e1a7ff", { emissive: "#a03adb", emissiveIntensity: 0.9, selectable: true });
+  const createBinaryHole = (radius, color) => {
+    const black = new THREE.Mesh(
+      new THREE.SphereGeometry(radius, 64, 48),
+      new THREE.MeshBasicMaterial({ color: "#000000" })
+    );
+    black.userData.selectable = true;
+    const photonRing = new THREE.Mesh(
+      new THREE.TorusGeometry(radius * 1.13, radius * 0.035, 8, 96),
+      new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.78, blending: THREE.AdditiveBlending })
+    );
+    photonRing.rotation.x = 0.34;
+    const body = new THREE.Group();
+    body.add(black, photonRing);
+    return body;
+  };
+  const starOne = createBinaryHole(0.48, "#8c92ff");
+  const starTwo = createBinaryHole(0.37, "#dba2ff");
   starTwo.position.x = 1.8;
   binaries.add(starOne, starTwo);
   const orbit = new THREE.Mesh(
@@ -376,22 +635,26 @@ function createTwinsScene(group) {
   homeOrbit.position.x = -2.15;
   homeOrbit.position.y = 1.3;
   group.add(homeOrbit);
-  const earth = makeSphere(0.56, "#315ca9", { emissive: "#16346e", emissiveIntensity: 0.55, selectable: true });
+  const earth = makeSphere(0.56, "#315ca9", { surface: "earth", selectable: true });
   earth.position.x = -2.15;
   earth.position.y = 1.3;
+  const earthClouds = createCloudLayer(0.56);
+  earthClouds.rotation.z = -0.16;
+  earth.add(earthClouds);
+  earth.add(createAtmosphere(0.62, "#6da8ff", 0.5));
   group.add(earth);
   const traveller = new THREE.Group();
   traveller.position.y = 1.3;
   group.add(traveller);
-  const ship = new THREE.Group();
+  const spacecraft = createDetailedSpacecraft();
+  const ship = spacecraft.ship;
   traveller.add(ship);
-  const shipCore = makeSphere(0.31, "#a28bfa", { emissive: "#6645dc", emissiveIntensity: 0.85, selectable: true });
   const shipRing = new THREE.Mesh(
-    new THREE.TorusGeometry(0.52, 0.018, 6, 80),
-    new THREE.MeshBasicMaterial({ color: "#cbb8ff", transparent: true, opacity: 0.75 })
+    new THREE.TorusGeometry(0.4, 0.009, 6, 80),
+    new THREE.MeshBasicMaterial({ color: "#a5c8ff", transparent: true, opacity: 0.42 })
   );
   shipRing.rotation.x = Math.PI / 2;
-  ship.add(shipCore, shipRing);
+  ship.add(shipRing);
   const path = makeLine([
     new THREE.Vector3(-4.8, 1.3, 0),
     new THREE.Vector3(-3.2, 1.45, 0),
@@ -417,16 +680,15 @@ function createTwinsScene(group) {
   const hand = makeLine([new THREE.Vector3(0, 0, 0.02), new THREE.Vector3(0.36, 0.15, 0.02)], "#e5c6ff", 0.9);
   clockGroup.add(hand);
   clockGroup.position.set(1.9, 1.45, 0);
-  return { traveller, ship, shipCore, earth, hand, clockGroup };
+  return { traveller, ship, shipCore: spacecraft.windowBand, engineGlow: spacecraft.engineGlow, earth, hand, clockGroup };
 }
 
 function createGpsScene(group) {
-  const earth = makeSphere(1.55, "#23539a", { emissive: "#102e67", emissiveIntensity: 0.6, selectable: true });
+  const earth = makeSphere(1.55, "#23539a", { surface: "earth", selectable: true });
   group.add(earth);
-  const atmosphere = new THREE.Mesh(
-    new THREE.SphereGeometry(1.78, 48, 32),
-    new THREE.MeshBasicMaterial({ color: "#5396ff", transparent: true, opacity: 0.1, side: THREE.BackSide })
-  );
+  const clouds = createCloudLayer(1.55);
+  earth.add(clouds);
+  const atmosphere = createAtmosphere(1.78, "#55a5ff", 0.62);
   group.add(atmosphere);
   const orbitConfigs = [
     { radius: 3.3, color: "#8095e5", rotation: [0.35, 0.2, 0.15], speed: 0.2 },
@@ -445,21 +707,13 @@ function createGpsScene(group) {
     const satellite = new THREE.Group();
     satellite.position.x = config.radius;
     orbitalGroup.add(satellite);
-    const body = makeSphere(0.12, index === 1 ? "#d6bcff" : "#a8bcff", {
-      emissive: "#647aff",
-      emissiveIntensity: 0.9,
-      selectable: true
-    });
-    const panel = new THREE.Mesh(
-      new THREE.BoxGeometry(0.42, 0.08, 0.025),
-      new THREE.MeshBasicMaterial({ color: "#6f7fe0" })
-    );
-    panel.position.x = 0.24;
-    satellite.add(body, panel);
+    const model = createDetailedSatellite(index === 1 ? 0.48 : 0.42);
+    model.rotation.y += index * 0.8;
+    satellite.add(model);
     group.add(orbitalGroup);
-    return { orbitalGroup, satellite, speed: config.speed };
+    return { orbitalGroup, satellite, model, speed: config.speed };
   });
-  return { earth, atmosphere, satellites };
+  return { earth, clouds, atmosphere, satellites };
 }
 
 function createUniverse() {
@@ -475,6 +729,8 @@ function createUniverse() {
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
     renderer.toneMappingExposure = 1.25;
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     webglAvailable = true;
   } catch (error) {
     console.warn("WebGL could not be initialized; continuing with the visual fallback.", error);
@@ -498,6 +754,13 @@ function createUniverse() {
   scene.add(new THREE.HemisphereLight("#8eacff", "#080b14", 1.12));
   const keyLight = new THREE.DirectionalLight("#b3c4ff", 2.1);
   keyLight.position.set(-4, 6, 7);
+  keyLight.castShadow = true;
+  keyLight.shadow.mapSize.set(1024, 1024);
+  keyLight.shadow.camera.left = -10;
+  keyLight.shadow.camera.right = 10;
+  keyLight.shadow.camera.top = 10;
+  keyLight.shadow.camera.bottom = -10;
+  keyLight.shadow.bias = -0.0003;
   scene.add(keyLight);
   const rimLight = new THREE.PointLight("#8459ff", 5.2, 24);
   rimLight.position.set(4, 1, -3);
@@ -519,10 +782,24 @@ function createUniverse() {
     const group = new THREE.Group();
     group.visible = index === 0;
     group.userData.homeScale = 1;
+    group.userData.chapterId = chapters[index].id;
     scene.add(group);
-    sceneGroups.push({ group, visual: build(group) });
+    const visual = build(group);
+    group.traverse((object) => {
+      if (!object.isMesh) return;
+      object.castShadow = object.geometry.type === "SphereGeometry";
+      object.receiveShadow = object.geometry.type === "SphereGeometry";
+    });
+    sceneGroups.push({ group, visual });
   });
   scene.userData.stars = stars;
+  fitBlackHoleToViewport();
+
+  composer = new EffectComposer(renderer);
+  composer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1, 1200 / window.innerWidth));
+  composer.addPass(new RenderPass(scene, camera));
+  composer.addPass(new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.18, 0.3, 1.5));
+  composer.addPass(new OutputPass());
 
   const render = () => {
     requestAnimationFrame(render);
@@ -540,10 +817,15 @@ function createUniverse() {
 
     const active = sceneGroups[currentChapter]?.visual;
     if (currentChapter === 1 && active.satellitePivot) active.satellitePivot.rotation.z += 0.003;
+    if (currentChapter === 0 && active.clouds) active.clouds.rotation.y += 0.0008;
+    if (currentChapter === 1) {
+      const surfaceShader = active.sun.material.userData.surfaceShader;
+      if (surfaceShader?.uniforms.uSurfaceTime) surfaceShader.uniforms.uSurfaceTime.value = elapsed;
+      active.planet.rotation.y += 0.002;
+    }
     if (currentChapter === 2) {
-      active.disk.rotation.z += activeView === "horizon" ? 0.0018 : 0.00055;
-      active.particles.rotation.y += 0.001;
-      active.farHalo.rotation.z -= 0.001;
+      active.material.uniforms.uTime.value = elapsed;
+      active.material.uniforms.uView.value.copy(pointer);
     }
     if (currentChapter === 3) {
       active.binaries.rotation.y += 0.007 * (0.4 + interactionValue / 100);
@@ -559,15 +841,21 @@ function createUniverse() {
     if (currentChapter === 4) {
       active.traveller.position.x = Math.sin(elapsed * (0.12 + interactionValue / 280)) * 4.2;
       active.ship.rotation.y += 0.006;
+      active.earth.rotation.y += 0.0011;
+      active.engineGlow.material.opacity = 0.3 + Math.sin(elapsed * 5.2) * 0.08 + interactionValue / 500;
       active.hand.rotation.z = -elapsed * 0.08;
     }
     if (currentChapter === 5) {
-      active.satellites.forEach(({ orbitalGroup, speed }, index) => {
+      active.earth.rotation.y += 0.0012;
+      active.clouds.rotation.y += 0.0016;
+      active.satellites.forEach(({ orbitalGroup, model, speed }, index) => {
         orbitalGroup.rotation.y += speed * 0.005 * (0.7 + interactionValue / 100);
         orbitalGroup.rotation.z += (index + 1) * 0.0001;
+        model.rotation.z += 0.0012 * (index % 2 === 0 ? 1 : -1);
       });
     }
-    renderer.render(scene, camera);
+    if (currentChapter === 2) composer.render();
+    else renderer.render(scene, camera);
   };
   render();
 }
@@ -677,9 +965,9 @@ function updateSceneInteraction(index) {
 function setBlackHoleView(view) {
   if (activeView === view) return;
   activeView = view;
-  const visual = sceneGroups[2].visual;
   const isCurvature = view === "curvature";
   if (webglAvailable) {
+    const visual = sceneGroups[2].visual;
     gsap.killTweensOf(visual.curvatureMaterials);
     if (isCurvature) visual.curvature.visible = true;
     gsap.to(visual.curvatureMaterials, {
@@ -689,13 +977,10 @@ function setBlackHoleView(view) {
         if (!isCurvature && activeView === "horizon") visual.curvature.visible = false;
       }
     });
-    gsap.to(visual.diskMaterial, {
-      opacity: (index, material) => material.userData.baseOpacity * (isCurvature ? 0.28 : 1),
+    gsap.to(visual.material.uniforms.uDiskOpacity, {
+      value: isCurvature ? 0.25 : 1,
       duration: 0.65
     });
-    gsap.to(visual.lensRing.material, { opacity: isCurvature ? 0.18 : 0.58, duration: 0.65 });
-    gsap.to(visual.horizonEdge.material, { opacity: isCurvature ? 0.16 : 0.65, duration: 0.55 });
-    gsap.to(visual.horizon.scale, { x: isCurvature ? 0.74 : 1, y: isCurvature ? 0.74 : 1, z: isCurvature ? 0.74 : 1, duration: 0.75, ease: "power2.inOut" });
   }
   updateBlackHoleCopy(view);
 }
@@ -716,17 +1001,11 @@ function resetBlackHoleVisual() {
   const visual = sceneGroups[2].visual;
   gsap.killTweensOf([
     ...visual.curvatureMaterials,
-    ...visual.diskMaterial,
-    visual.lensRing.material,
-    visual.horizonEdge.material,
-    visual.horizon.scale
+    visual.material.uniforms.uDiskOpacity
   ]);
   visual.curvature.visible = false;
   visual.curvatureMaterials.forEach((material) => { material.opacity = 0; });
-  visual.horizon.scale.setScalar(1);
-  visual.diskMaterial.forEach((material) => { material.opacity = material.userData.baseOpacity; });
-  visual.lensRing.material.opacity = 0.58;
-  visual.horizonEdge.material.opacity = 0.42;
+  visual.material.uniforms.uDiskOpacity.value = 1;
   activeView = "horizon";
 }
 
@@ -781,89 +1060,41 @@ function setActiveChapterUi(index, { animate = true } = {}) {
   if (chapter.id === "blackhole") updateBlackHoleCopy(activeView);
 }
 
-function transitionScene(fromIndex, toIndex, duration = 1.6) {
+function transitionScene(fromIndex, toIndex, duration = 0.7) {
   if (!webglAvailable) return;
   activeTimeline?.kill();
-  activeTimeline = null;
+  gsap.killTweensOf(cameraState);
+
+  // Visibility changes synchronously. No delayed callback may reveal an old chapter.
   sceneGroups.forEach(({ group }, index) => {
-    group.visible = index === fromIndex;
+    gsap.killTweensOf([group.scale, group.rotation]);
+    group.visible = index === toIndex;
     group.scale.setScalar(1);
     group.rotation.set(0, 0, 0);
-    group.traverse((object) => {
-      if (!object.material || Array.isArray(object.material)) return;
-      gsap.killTweensOf(object.material);
-      if (object.material.userData.sceneBaseOpacity !== undefined) {
-        object.material.opacity = object.material.userData.sceneBaseOpacity;
-        object.material.transparent = object.material.userData.sceneBaseTransparent;
-        object.material.needsUpdate = true;
-      }
-    });
   });
   if (fromIndex === 2 || toIndex === 2) resetBlackHoleVisual();
-  const outgoing = sceneGroups[fromIndex];
-  const incoming = sceneGroups[toIndex];
-  incoming.group.visible = true;
-  incoming.group.scale.setScalar(0.88);
-  incoming.group.rotation.set(0, 0, 0);
-  outgoing.group.traverse((object) => {
-    if (object.material && !Array.isArray(object.material) && object.material.opacity !== undefined) {
-      object.material.userData.sceneBaseOpacity ??= object.material.opacity;
-      object.material.userData.sceneBaseTransparent ??= object.material.transparent;
-    }
-  });
-  incoming.group.traverse((object) => {
-    if (object.material && !Array.isArray(object.material) && object.material.opacity !== undefined) {
-      object.material.userData.sceneBaseOpacity ??= object.material.opacity;
-      object.material.userData.sceneBaseTransparent ??= object.material.transparent;
-      object.material.transparent = true;
-      object.material.opacity = 0;
-      object.material.needsUpdate = true;
-    }
-  });
-  activeTimeline = gsap.timeline({ defaults: { ease: "power2.inOut" } });
-  activeTimeline.to(outgoing.group.scale, { x: 0.84, y: 0.84, z: 0.84, duration: duration * 0.42 }, 0);
-  activeTimeline.to(outgoing.group.rotation, { y: 0.28, x: -0.08, duration: duration * 0.42 }, 0);
-  const opacityMaterials = [];
-  incoming.group.traverse((object) => {
-    if (object.material && !Array.isArray(object.material) && object.material.opacity !== undefined) opacityMaterials.push(object.material);
-  });
-  activeTimeline.to(incoming.group.scale, { x: 1, y: 1, z: 1, duration }, 0.08);
-  if (opacityMaterials.length > 0) {
-    activeTimeline.to(opacityMaterials, {
-      opacity: (index, material) => material.userData.sceneBaseOpacity,
-      duration: duration * 0.74,
-      stagger: 0.001
-    }, 0.08);
-  }
+
+  const incoming = sceneGroups[toIndex].group;
   const nextCamera = chapters[toIndex].camera;
+  incoming.scale.setScalar(0.96);
+  activeTimeline = gsap.timeline({ defaults: { ease: "power2.out" } });
+  activeTimeline.to(incoming.scale, { x: 1, y: 1, z: 1, duration }, 0);
   activeTimeline.to(cameraState, {
     x: nextCamera[0],
     y: nextCamera[1],
     z: nextCamera[2],
-    duration: duration * 0.9,
-    ease: "power3.inOut"
+    duration
   }, 0);
-  activeTimeline.call(() => {
-    opacityMaterials.forEach((material) => {
-      material.transparent = material.userData.sceneBaseTransparent;
-      material.needsUpdate = true;
-    });
-    outgoing.group.visible = false;
-    outgoing.group.scale.setScalar(1);
-    outgoing.group.rotation.set(0, 0, 0);
-  }, [], duration * 0.92);
-  if (toIndex === 2) {
-    activeTimeline.fromTo(incoming.group.rotation, { y: -0.32 }, { y: 0, duration: 1.15, ease: "power2.out" }, 0.1);
-  }
 }
 
 function selectChapter(index, options = {}) {
   if (index < 0 || index >= chapters.length || index === currentChapter) return;
   const previous = currentChapter;
   currentChapter = index;
+  interactionValue = chapters[index].interaction?.value ?? 50;
   if (index === 2) resetBlackHoleVisual();
   if (isPaused) {
-    gsap.globalTimeline.resume();
+    activeTimeline?.resume();
     clock.start();
   }
   isPaused = false;
@@ -871,7 +1102,7 @@ function selectChapter(index, options = {}) {
   dom.pause.setAttribute("aria-label", "Pausar animação");
   document.querySelector(".play-glyph").textContent = "Ⅱ";
   setActiveChapterUi(index);
-  transitionScene(previous, index, options.immediate || prefersReducedMotion ? 0.01 : index === 2 ? 2.5 : 1.55);
+  transitionScene(previous, index, options.immediate || prefersReducedMotion ? 0.01 : 0.7);
 }
 
 function resetExperience() {
@@ -882,22 +1113,15 @@ function resetExperience() {
   pointer.set(0, 0);
   interactionValue = chapters[currentChapter].interaction?.value ?? 50;
   activeView = "horizon";
-  gsap.globalTimeline.resume();
+  gsap.killTweensOf(cameraState);
+  const homeCamera = chapters[currentChapter].camera;
+  Object.assign(cameraState, { x: homeCamera[0], y: homeCamera[1], z: homeCamera[2] });
   clock.start();
   if (webglAvailable) {
     sceneGroups.forEach(({ group }, index) => {
       group.visible = index === currentChapter;
       group.scale.setScalar(1);
       group.rotation.set(0, 0, 0);
-      group.traverse((object) => {
-        if (!object.material || Array.isArray(object.material)) return;
-        gsap.killTweensOf(object.material);
-        if (object.material.userData.sceneBaseOpacity !== undefined) {
-          object.material.opacity = object.material.userData.sceneBaseOpacity;
-          object.material.transparent = object.material.userData.sceneBaseTransparent;
-          object.material.needsUpdate = true;
-        }
-      });
     });
     if (currentChapter === 2) {
       resetBlackHoleVisual();
@@ -928,14 +1152,14 @@ function resetExperience() {
 function togglePause() {
   isPaused = !isPaused;
   if (isPaused) {
-    gsap.globalTimeline.pause();
+    activeTimeline?.pause();
     clock.stop();
     dom.pauseLabel.textContent = "RETOMAR";
     dom.pause.setAttribute("aria-label", "Retomar animação");
     document.querySelector(".play-glyph").textContent = "▶";
     document.querySelector("#scene-status").textContent = "OBSERVAÇÃO PAUSADA";
   } else {
-    gsap.globalTimeline.resume();
+    activeTimeline?.resume();
     clock.start();
     dom.pauseLabel.textContent = "PAUSAR";
     dom.pause.setAttribute("aria-label", "Pausar animação");
@@ -974,7 +1198,7 @@ function onCanvasClick(event) {
   const target = raycaster.intersectObjects(objects, true)[0];
   if (!target) return;
   if (currentChapter === 2) {
-    const isHorizon = target.object === sceneGroups[2].visual.horizon || target.object === sceneGroups[2].visual.lensRing;
+    const isHorizon = target.uv && target.uv.distanceTo(new THREE.Vector2(0.5, 0.5)) < 0.13;
     setBlackHoleView(isHorizon ? "horizon" : "curvature");
   } else {
     const element = sceneGroups[currentChapter].visual;
@@ -1024,8 +1248,11 @@ dom.canvas.addEventListener("click", onCanvasClick);
 window.addEventListener("keydown", onKeyDown);
 window.addEventListener("resize", () => {
   if (!webglAvailable) return;
+  fitBlackHoleToViewport();
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.8));
   renderer.setSize(window.innerWidth, window.innerHeight);
+  composer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1, 1200 / window.innerWidth));
+  composer.setSize(window.innerWidth, window.innerHeight);
 });
